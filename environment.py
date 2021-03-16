@@ -20,10 +20,11 @@ class State:
     # Price in USD
     market_price: float
     # Price percentage delta in USD
-    market_delta: float
-    hourly_delta: float
+    market_delta: int  # -1000 - 1000
+    hourly_delta: int  # 0 - 1000
     crypto_balance: float
     cash_balance: float
+    daily_sentiment_change: int  # 0 - 100
 
     @property
     def total_balance(self):
@@ -53,9 +54,18 @@ class State:
 
         return is_bankrupt or is_rich
 
+    @property
+    def was_profitable(self) -> bool:
+        return self.total_balance >= STARTING_BALANCE * 10.0
+
     def __hash__(self):
         return hash(
-            (self.overall_profit, self.market_percent_change, self.market_hourly_change)
+            (
+                self.overall_profit,
+                self.market_delta,
+                self.market_hourly_change,
+                self.daily_sentiment_change,
+            )
         )
 
     def __eq__(self, other):
@@ -63,11 +73,6 @@ class State:
 
     def __str__(self):
         return f"Overall Profit: {self.overall_profit}"
-
-    @classmethod
-    def default(cls):
-        (_price_usd, _hourly_delta) = Crypto.get_current_data()
-        return cls(_price_usd, 0.0, _hourly_delta, 0.0, STARTING_BALANCE)
 
 
 class Environment:
@@ -82,22 +87,42 @@ class Environment:
     def with_csv_fetcher(cls):
         return cls(Crypto.get_archived_data().__next__)
 
+    def default_state(self):
+        (
+            new_price_usd,
+            new_price_delta,
+            new_hourly_usd_change,
+            daily_sentiment_change,
+        ) = self.fetch_data()
+
+        first_state = State(
+            market_price=new_price_usd,
+            market_delta=new_price_delta,
+            hourly_delta=new_hourly_usd_change,
+            crypto_balance=0.0,
+            cash_balance=STARTING_BALANCE,
+            daily_sentiment_change=daily_sentiment_change,
+        )
+        return first_state
+
     def __init__(self, data_fetch_fn):
         self.fetch_data = data_fetch_fn
 
     def step(self, state: State, action: Action) -> tuple[State, float]:
         new_crypto_balance = state.crypto_balance
         new_cash_balance = state.cash_balance
-        (new_price_usd, new_hourly_usd_change) = self.fetch_data()
-        new_price_delta = (new_price_usd - state.market_price) / state.market_price
+        (
+            new_price_usd,
+            new_price_delta,
+            new_hourly_usd_change,
+            daily_sentiment_change,
+        ) = self.fetch_data()
 
         reward = 0.0
 
         # Perform action
         if action == Action.buy:
-            purchase_amount_usd = (
-                0.5 * state.cash_balance
-            )  # TODO: Make proportion stem from policy prediction.
+            purchase_amount_usd = 0.5 * state.cash_balance
 
             crypto_purchased = Crypto.purchase(new_price_usd, purchase_amount_usd)
 
@@ -112,18 +137,23 @@ class Environment:
             new_cash_balance += sale_return_usd
             new_crypto_balance -= sale_amount_crypto
 
-            # Sales generate rewards
-            reward = (
-                new_cash_balance + (new_crypto_balance * new_price_usd)
-            ) - state.total_balance
-
         new_state = State(
             new_price_usd,
             new_price_delta,
             new_hourly_usd_change,
             new_crypto_balance,
             new_cash_balance,
+            daily_sentiment_change,
         )
+
+        reward = 0
+
+        if new_state.is_terminal:
+            # Diagnose the issue
+            if new_state.was_profitable:
+                reward = 1
+            else:
+                reward = -1
 
         return new_state, reward
 
